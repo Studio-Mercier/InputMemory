@@ -217,11 +217,35 @@ struct DEUSGOLOOK_API FDeusGoLookPatternSlot
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Groove Darkness", ClampMin = "0", ClampMax = "1"))
 	float GrooveDarkness = 0.6f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Groove Mesh Edges", ToolTip = "Adds a groove along the mesh border and its corners, so panels end on a seam instead of being cut off"))
+	bool bEdgeGrooves = true;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Bevel Color", HideAlphaChannel, ToolTip = "Lit edge along one side of each groove"))
 	FLinearColor BevelColor = FLinearColor(1.0f, 0.78f, 0.35f, 1.f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Bevel Strength", ClampMin = "0", UIMax = "4"))
 	float BevelStrength = 0.8f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Motion Direction", ClampMin = "-180", ClampMax = "180", Units = "Degrees", ToolTip = "Direction for Scroll and Wave, 0 is world +X on floors"))
+	float MotionAngle = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Scroll Speed", ClampMin = "0", UIMax = "500", Units = "cm/s", ToolTip = "Slides the whole pattern, 0 keeps it still"))
+	float ScrollSpeed = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Shimmer", ClampMin = "0", ClampMax = "1", ToolTip = "Panels flicker in brightness, each on its own rhythm, 0 is off"))
+	float ShimmerAmount = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Shimmer Speed", EditCondition = "ShimmerAmount > 0", ClampMin = "0", UIMax = "8", ToolTip = "Flickers per second"))
+	float ShimmerSpeed = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Wave", ClampMin = "0", UIMax = "4", ToolTip = "A band of panels lighting up in Bevel Color, sweeping along Motion Direction, 0 is off"))
+	float WaveStrength = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Wave Speed", EditCondition = "WaveStrength > 0", ClampMin = "0", UIMax = "20", ToolTip = "Panels per second"))
+	float WaveSpeed = 3.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Wave Spacing", EditCondition = "WaveStrength > 0", ClampMin = "2", UIMax = "64", ToolTip = "Panels between two bands"))
+	float WaveSpacing = 12.f;
 };
 
 USTRUCT(BlueprintType, meta = (GroupHelp = "Panel patterns on chosen meshes. On a mesh tick Render CustomDepth Pass and set CustomDepth Stencil Value 5 to 8 to pick a slot"))

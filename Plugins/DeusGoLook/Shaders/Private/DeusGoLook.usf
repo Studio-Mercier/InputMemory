@@ -18,9 +18,11 @@ float4 NeonColors[4]; // rgb, a zone brightness
 float4 NeonZones[4]; // pulse amount, pulse speed, line style, unused
 float4 PatternOrigins[4]; // xyz folded camera offset
 float4 PatternShapes[4]; // shape, size, facet variation, groove width
-float4 PatternGrooves[4]; // groove darkness, bevel strength, unused, unused
+float4 PatternGrooves[4]; // groove darkness, bevel strength, mesh edge grooves, wave spacing
 float4 PatternTints[4];
 float4 PatternBevels[4];
+float4 PatternMotion[4]; // scroll xy in panels per second, shimmer amount, shimmer speed
+float4 PatternWaves[4]; // wave strength, wave speed, direction xy
 float3 FogNoiseOrigin;
 float3 NeonHexOrigin;
 float FogStart;
@@ -318,6 +320,7 @@ struct FPatternCell
 	float EdgeDistance; // 0 on the border, 1 at the center
 	float2 Outward; // in the pattern plane, for the bevel side
 	float2 Id;
+	float2 Center; // in the pattern plane, for the wave
 };
 
 // wraps every 64 cells, the 448 cell origin fold is a multiple so facets never pop
@@ -347,6 +350,10 @@ FPatternCell TriangleCell(float2 P)
 	Out.EdgeDistance = Nearest / (H / 3.0f);
 	Out.Outward = bUpper ? -N : N;
 	Out.Id = Cell * float2(2.0f, 1.0f) + float2(bUpper ? 1.0f : 0.0f, 0.0f);
+
+	// centroid in lattice space, back to the plane
+	float2 Lattice = Cell + (bUpper ? 2.0f / 3.0f : 1.0f / 3.0f);
+	Out.Center = float2(Lattice.x + 0.5f * Lattice.y, Lattice.y * H);
 	return Out;
 }
 
@@ -358,22 +365,28 @@ FPatternCell HexCell(float2 P)
 	Out.EdgeDistance = (0.5f - HexDistance(G)) / 0.5f;
 	Out.Outward = normalize(G + 1e-5f);
 	Out.Id = P - G;
+	Out.Center = P - G;
 	return Out;
 }
 
-// facets, grooves and a bevel, multiplied into the lit surface so lighting and fog still apply
-float3 ApplyPattern(float3 Color, float2 UV, float2 TexelSize, uint Slot)
+// per axis, the neighbour closest in world space is on the same surface, so silhouettes do not bend the normal
+float3 SurfaceNormal(float2 UV, float2 TexelSize, float3 P)
 {
-	float4 Shape = PatternShapes[Slot];
-	float4 Groove = PatternGrooves[Slot];
-
-	float3 P = TranslatedWorldFromUV(UV);
+	float3 PL = TranslatedWorldFromUV(UV - float2(TexelSize.x, 0.0f));
 	float3 PR = TranslatedWorldFromUV(UV + float2(TexelSize.x, 0.0f));
+	float3 PU = TranslatedWorldFromUV(UV - float2(0.0f, TexelSize.y));
 	float3 PD = TranslatedWorldFromUV(UV + float2(0.0f, TexelSize.y));
-	float3 N = abs(cross(PR - P, PD - P));
 
-	float3 W = (P + PatternOrigins[Slot].xyz) / Shape.y;
-	float2 Plane = (N.z >= N.x && N.z >= N.y) ? W.xy : (N.x >= N.y ? W.yz : W.xz);
+	float3 DX = dot(PR - P, PR - P) < dot(P - PL, P - PL) ? PR - P : P - PL;
+	float3 DY = dot(PD - P, PD - P) < dot(P - PU, P - PU) ? PD - P : P - PU;
+	return normalize(cross(DX, DY) + 1e-6f);
+}
+
+// shading multiplier and bevel amount for one projection plane
+void PatternOnPlane(float2 Plane, float4 Shape, float4 Groove, float4 Motion, float4 Wave, out float Shade, out float Bevel)
+{
+	// panels carry their id while sliding, so facets and shimmer travel with them
+	Plane += Motion.xy * View.RealTime;
 
 	// ternary cannot return a struct in HLSL
 	FPatternCell Cell;
@@ -387,13 +400,108 @@ float3 ApplyPattern(float3 Color, float2 UV, float2 TexelSize, uint Slot)
 	}
 
 	float Facet = 1.0f + (PatternHash(Cell.Id) - 0.5f) * 2.0f * Shape.z;
+	if (Motion.z > 0.0f)
+	{
+		float Phase = PatternHash(Cell.Id + 17.31f) * 2.0f * PI;
+		Facet += sin(View.RealTime * Motion.w * 2.0f * PI + Phase) * Motion.z * 0.5f;
+	}
+
 	float NotGroove = smoothstep(Shape.w * 0.5f, Shape.w, Cell.EdgeDistance);
-	Color *= PatternTints[Slot].rgb * Facet * lerp(1.0f - Groove.x, 1.0f, NotGroove);
+	Shade = max(Facet, 0.0f) * lerp(1.0f - Groove.x, 1.0f, NotGroove);
 
 	// thin band just inside the groove, lit on the side facing a fixed light
 	float Band = NotGroove * (1.0f - smoothstep(Shape.w * 2.5f, Shape.w * 3.5f, Cell.EdgeDistance));
-	float Facing = saturate(dot(Cell.Outward, float2(0.6f, 0.8f)));
-	Color += Color * PatternBevels[Slot].rgb * Groove.y * Band * Facing;
+	Bevel = Band * saturate(dot(Cell.Outward, float2(0.6f, 0.8f))) * Groove.y;
+
+	// whole panels light up as the band passes their center, about two panels wide
+	if (Wave.x > 0.0f)
+	{
+		float Along = dot(Cell.Center, Wave.zw);
+		float S = frac((Along - View.RealTime * Wave.y) / Groove.w);
+		Bevel += (1.0f - saturate(abs(S - 0.5f) * Groove.w)) * Wave.x * NotGroove;
+	}
+}
+
+// mesh border or a corner in the geometry, so panels end on a seam instead of mid cell
+float PatternMeshEdge(float2 UV, float2 TexelSize, float CenterDepth, uint Stencil)
+{
+	float2 O = TexelSize * 1.5f;
+	float2 UVL = UV - float2(O.x, 0.0f);
+	float2 UVR = UV + float2(O.x, 0.0f);
+	float2 UVU = UV - float2(0.0f, O.y);
+	float2 UVD = UV + float2(0.0f, O.y);
+
+	bool bBorder = StencilAt(UVL) != Stencil || StencilAt(UVR) != Stencil || StencilAt(UVU) != Stencil || StencilAt(UVD) != Stencil;
+
+	// depth second derivative, flat on any plane, spikes at convex and concave corners alike
+	float Curvature = (abs(CalcSceneDepth(UVL) + CalcSceneDepth(UVR) - 2.0f * CenterDepth)
+		+ abs(CalcSceneDepth(UVU) + CalcSceneDepth(UVD) - 2.0f * CenterDepth)) / max(CenterDepth, 1.0f);
+
+	return max(bBorder ? 1.0f : 0.0f, smoothstep(0.002f, 0.006f, Curvature));
+}
+
+// facets, grooves and a bevel, multiplied into the lit surface so lighting and fog still apply
+// triplanar, the three projections cross fade by surface angle instead of snapping at 45 degrees
+float3 ApplyPattern(float3 Color, float2 UV, float2 TexelSize, float Depth, uint Stencil)
+{
+	uint Slot = Stencil - 5;
+	float4 Shape = PatternShapes[Slot];
+	float4 Groove = PatternGrooves[Slot];
+	float4 Motion = PatternMotion[Slot];
+	float4 Wave = PatternWaves[Slot];
+
+	float3 P = TranslatedWorldFromUV(UV);
+	float3 N = SurfaceNormal(UV, TexelSize, P);
+
+	// sharp blend, wide blends ghost two grids on top of each other
+	float3 Weights = pow(abs(N), 8.0f);
+	Weights /= dot(Weights, float3(1.0f, 1.0f, 1.0f)) + 1e-5f;
+
+	float3 W = (P + PatternOrigins[Slot].xyz) / Shape.y;
+
+	float Shade = 0.0f;
+	float Bevel = 0.0f;
+	float Used = 0.0f;
+	float PlaneShade;
+	float PlaneBevel;
+
+	BRANCH
+	if (Weights.z > 0.01f)
+	{
+		PatternOnPlane(W.xy, Shape, Groove, Motion, Wave, PlaneShade, PlaneBevel);
+		Shade += PlaneShade * Weights.z;
+		Bevel += PlaneBevel * Weights.z;
+		Used += Weights.z;
+	}
+	BRANCH
+	if (Weights.x > 0.01f)
+	{
+		PatternOnPlane(W.yz, Shape, Groove, Motion, Wave, PlaneShade, PlaneBevel);
+		Shade += PlaneShade * Weights.x;
+		Bevel += PlaneBevel * Weights.x;
+		Used += Weights.x;
+	}
+	BRANCH
+	if (Weights.y > 0.01f)
+	{
+		PatternOnPlane(W.xz, Shape, Groove, Motion, Wave, PlaneShade, PlaneBevel);
+		Shade += PlaneShade * Weights.y;
+		Bevel += PlaneBevel * Weights.y;
+		Used += Weights.y;
+	}
+	Shade /= max(Used, 1e-5f);
+	Bevel /= max(Used, 1e-5f);
+
+	BRANCH
+	if (Groove.z > 0.0f)
+	{
+		float Edge = PatternMeshEdge(UV, TexelSize, Depth, Stencil);
+		Shade *= lerp(1.0f, 1.0f - Groove.x, Edge);
+		Bevel *= 1.0f - Edge;
+	}
+
+	Color *= PatternTints[Slot].rgb * Shade;
+	Color += Color * PatternBevels[Slot].rgb * Bevel;
 	return Color;
 }
 
@@ -454,9 +562,10 @@ void DepthPS(
 	if (PatternsEnabled > 0.0f)
 	{
 		uint S = StencilAt(UV);
-		if (S >= 5 && S <= 8 && CalcSceneCustomDepth(UV) <= Depth * 1.002f + 2.0f)
+		// loose, grazing floors drift a little between the two depth buffers and lost patches look like holes
+		if (S >= 5 && S <= 8 && CalcSceneCustomDepth(UV) <= Depth * 1.01f + 5.0f)
 		{
-			Color = ApplyPattern(Color, UV, TexelSize, S - 5);
+			Color = ApplyPattern(Color, UV, TexelSize, Depth, S);
 		}
 	}
 

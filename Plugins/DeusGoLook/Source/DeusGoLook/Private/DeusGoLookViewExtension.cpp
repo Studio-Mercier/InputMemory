@@ -81,6 +81,8 @@ public:
 		SHADER_PARAMETER_ARRAY(FVector4f, PatternGrooves, [4])
 		SHADER_PARAMETER_ARRAY(FVector4f, PatternTints, [4])
 		SHADER_PARAMETER_ARRAY(FVector4f, PatternBevels, [4])
+		SHADER_PARAMETER_ARRAY(FVector4f, PatternMotion, [4])
+		SHADER_PARAMETER_ARRAY(FVector4f, PatternWaves, [4])
 		SHADER_PARAMETER(float, NeonOccludedOpacity)
 		SHADER_PARAMETER(float, NeonIgnoreFog)
 		SHADER_PARAMETER(float, NeonSaturationBoost)
@@ -273,7 +275,14 @@ static void FillParameters(FDeusGoLookPS::FParameters& Out, const FDeusGoLookSty
 			float(FMath::Fmod(Origin.Z, Period)),
 			0.f);
 		Out.PatternShapes[Index] = FVector4f(Slot.Shape == EDeusGoLookPattern::Hexagons ? 1.f : 0.f, float(Size), Slot.FacetVariation, Slot.GrooveWidth);
-		Out.PatternGrooves[Index] = FVector4f(Slot.GrooveDarkness, Slot.BevelStrength, 0.f, 0.f);
+		Out.PatternGrooves[Index] = FVector4f(Slot.GrooveDarkness, Slot.BevelStrength, Slot.bEdgeGrooves ? 1.f : 0.f, FMath::Max(Slot.WaveSpacing, 2.f));
+
+		// scroll goes in as panels per second so the shader adds it straight to the cell coordinates
+		const float Angle = FMath::DegreesToRadians(Slot.MotionAngle);
+		const FVector2f Direction(FMath::Cos(Angle), FMath::Sin(Angle));
+		const float ScrollCells = Slot.ScrollSpeed / float(Size);
+		Out.PatternMotion[Index] = FVector4f(Direction.X * ScrollCells, Direction.Y * ScrollCells, Slot.ShimmerAmount, Slot.ShimmerSpeed);
+		Out.PatternWaves[Index] = FVector4f(Slot.WaveStrength, Slot.WaveSpeed, Direction.X, Direction.Y);
 		Out.PatternTints[Index] = FVector4f(Slot.Tint);
 		Out.PatternBevels[Index] = FVector4f(Slot.BevelColor);
 	}
