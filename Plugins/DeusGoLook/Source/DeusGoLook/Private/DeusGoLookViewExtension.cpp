@@ -276,14 +276,20 @@ static FScreenPassTexture RunPass(
 		return SceneColor;
 	}
 
-	// explicit desc, copying SceneColor's carries flags D3D refuses on this RTV
-	const FRDGTextureDesc OutputDesc = FRDGTextureDesc::Create2D(
-		SceneColor.Texture->Desc.Extent,
-		SceneColor.Texture->Desc.Format,
-		FClearValueBinding::Black,
-		TexCreate_RenderTargetable | TexCreate_ShaderResource);
-	FRDGTextureRef OutputTexture = GraphBuilder.CreateTexture(OutputDesc, TEXT("DeusGoLookOutput"));
-	FScreenPassRenderTarget Output(OutputTexture, SceneColor.ViewRect, ERenderTargetLoadAction::ENoAction);
+	// last pass of the chain must draw into the view family target, a texture of our own is dropped and PIE goes black
+	// editor viewports composite gizmos after us so they never hit this, Play does
+	FScreenPassRenderTarget Output = Inputs.OverrideOutput;
+	if (!Output.IsValid())
+	{
+		// explicit desc, copying SceneColor's carries flags D3D refuses on this RTV
+		const FRDGTextureDesc OutputDesc = FRDGTextureDesc::Create2D(
+			SceneColor.Texture->Desc.Extent,
+			SceneColor.Texture->Desc.Format,
+			FClearValueBinding::Black,
+			TexCreate_RenderTargetable | TexCreate_ShaderResource);
+		FRDGTextureRef OutputTexture = GraphBuilder.CreateTexture(OutputDesc, TEXT("DeusGoLookOutput"));
+		Output = FScreenPassRenderTarget(OutputTexture, SceneColor.ViewRect, ERenderTargetLoadAction::ENoAction);
+	}
 
 	typename TShaderClass::FParameters* Parameters = GraphBuilder.AllocParameters<typename TShaderClass::FParameters>();
 	Parameters->View = View.ViewUniformBuffer;
