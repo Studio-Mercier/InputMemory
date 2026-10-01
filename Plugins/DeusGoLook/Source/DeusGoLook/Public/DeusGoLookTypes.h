@@ -180,6 +180,72 @@ struct DEUSGOLOOK_API FDeusGoLookEdges
 };
 
 UENUM(BlueprintType)
+enum class EDeusGoLookPattern : uint8
+{
+	Triangles,
+	Hexagons
+};
+
+// one stencil value, 5 to 8
+USTRUCT(BlueprintType)
+struct DEUSGOLOOK_API FDeusGoLookPatternSlot
+{
+	GENERATED_BODY()
+
+	FDeusGoLookPatternSlot() = default;
+	FDeusGoLookPatternSlot(EDeusGoLookPattern InShape, float InSize)
+		: Shape(InShape)
+		, Size(InSize)
+	{
+	}
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns")
+	EDeusGoLookPattern Shape = EDeusGoLookPattern::Triangles;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (ClampMin = "5", UIMax = "400", Units = "cm", ToolTip = "Width of one panel in the world"))
+	float Size = 60.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (HideAlphaChannel, ToolTip = "Multiplies the whole surface, white leaves its color alone"))
+	FLinearColor Tint = FLinearColor::White;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Facet Variation", ClampMin = "0", ClampMax = "1", ToolTip = "Brightness difference between panels, reads as tilted facets"))
+	float FacetVariation = 0.25f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Groove Width", ClampMin = "0.02", ClampMax = "0.4", ToolTip = "Fraction of the panel"))
+	float GrooveWidth = 0.08f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Groove Darkness", ClampMin = "0", ClampMax = "1"))
+	float GrooveDarkness = 0.6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Bevel Color", HideAlphaChannel, ToolTip = "Lit edge along one side of each groove"))
+	FLinearColor BevelColor = FLinearColor(1.0f, 0.78f, 0.35f, 1.f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Bevel Strength", ClampMin = "0", UIMax = "4"))
+	float BevelStrength = 0.8f;
+};
+
+USTRUCT(BlueprintType, meta = (GroupHelp = "Panel patterns on chosen meshes. On a mesh tick Render CustomDepth Pass and set CustomDepth Stencil Value 5 to 8 to pick a slot"))
+struct DEUSGOLOOK_API FDeusGoLookPatterns
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (DisplayName = "Enable Surface Patterns", ToolTip = "Needs Project Settings > Rendering > Custom Depth-Stencil Pass set to Enabled with Stencil"))
+	bool bPatterns = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (EditCondition = "bPatterns", DisplayName = "Stencil 5"))
+	FDeusGoLookPatternSlot Slot5 = FDeusGoLookPatternSlot(EDeusGoLookPattern::Triangles, 60.f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (EditCondition = "bPatterns", DisplayName = "Stencil 6"))
+	FDeusGoLookPatternSlot Slot6 = FDeusGoLookPatternSlot(EDeusGoLookPattern::Hexagons, 60.f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (EditCondition = "bPatterns", DisplayName = "Stencil 7"))
+	FDeusGoLookPatternSlot Slot7 = FDeusGoLookPatternSlot(EDeusGoLookPattern::Triangles, 150.f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Patterns", meta = (EditCondition = "bPatterns", DisplayName = "Stencil 8"))
+	FDeusGoLookPatternSlot Slot8 = FDeusGoLookPatternSlot(EDeusGoLookPattern::Hexagons, 25.f);
+};
+
+UENUM(BlueprintType)
 enum class EDeusGoLookNeonLine : uint8
 {
 	Solid,
@@ -235,7 +301,7 @@ struct DEUSGOLOOK_API FDeusGoLookNeon
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Neon", meta = (EditCondition = "bNeon", DisplayName = "Stencil 3"))
 	FDeusGoLookNeonZone Zone3 = FDeusGoLookNeonZone(FLinearColor(1.0f, 0.12f, 0.08f, 1.f), EDeusGoLookNeonLine::Solid, 0.6f, 2.0f);
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Neon", meta = (EditCondition = "bNeon", DisplayName = "Stencil 4", ToolTip = "Values above 4 wrap back to 1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Neon", meta = (EditCondition = "bNeon", DisplayName = "Stencil 4", ToolTip = "Stencil 5 to 8 are Surface Patterns, not neon"))
 	FDeusGoLookNeonZone Zone4 = FDeusGoLookNeonZone(FLinearColor(0.25f, 1.0f, 0.3f, 1.f), EDeusGoLookNeonLine::Solid, 0.15f, 0.4f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Neon", meta = (EditCondition = "bNeon", DisplayName = "Glow", ClampMin = "0", UIMax = "30", ToolTip = "Master brightness for every zone, raise until bloom picks it up and it starts to halo"))
@@ -333,6 +399,9 @@ struct DEUSGOLOOK_API FDeusGoLookStyle
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Look", meta = (DisplayName = "Neon Zones"))
 	FDeusGoLookNeon Neon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Look", meta = (DisplayName = "Surface Patterns"))
+	FDeusGoLookPatterns Patterns;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Look")
 	FDeusGoLookStylize Stylize;

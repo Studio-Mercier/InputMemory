@@ -75,6 +75,12 @@ public:
 		SHADER_PARAMETER(float, NeonHexSize)
 		SHADER_PARAMETER(float, NeonHexStrength)
 		SHADER_PARAMETER(float, NeonHexLine)
+		SHADER_PARAMETER(float, PatternsEnabled)
+		SHADER_PARAMETER_ARRAY(FVector4f, PatternOrigins, [4])
+		SHADER_PARAMETER_ARRAY(FVector4f, PatternShapes, [4])
+		SHADER_PARAMETER_ARRAY(FVector4f, PatternGrooves, [4])
+		SHADER_PARAMETER_ARRAY(FVector4f, PatternTints, [4])
+		SHADER_PARAMETER_ARRAY(FVector4f, PatternBevels, [4])
 		SHADER_PARAMETER(float, NeonOccludedOpacity)
 		SHADER_PARAMETER(float, NeonIgnoreFog)
 		SHADER_PARAMETER(float, NeonSaturationBoost)
@@ -249,6 +255,28 @@ static void FillParameters(FDeusGoLookPS::FParameters& Out, const FDeusGoLookSty
 	Out.NeonIgnoreFog = Neon.bNeonIgnoreFog ? 1.f : 0.f;
 	// grade lerps toward luma by Desaturation after tonemap, stretch chroma now so it lands back near the picked color
 	Out.NeonSaturationBoost = Neon.bNeonKeepSaturated ? 1.f / FMath::Max(1.f - Grade.Desaturation, 0.15f) : 1.f;
+
+	const FDeusGoLookPatterns& Patterns = S.Patterns;
+	const FDeusGoLookPatternSlot* Slots[4] = { &Patterns.Slot5, &Patterns.Slot6, &Patterns.Slot7, &Patterns.Slot8 };
+	Out.PatternsEnabled = Patterns.bPatterns ? 1.f : 0.f;
+	for (int32 Index = 0; Index < 4; ++Index)
+	{
+		const FDeusGoLookPatternSlot& Slot = *Slots[Index];
+
+		// same 7 cell fold as the hex fill, triangle rows are 0.875 high for the same reason
+		const double Size = FMath::Max(Slot.Size, 5.f);
+		const double Period = Size * 7.0 * 64.0;
+		const FVector Origin = -View.ViewMatrices.GetPreViewTranslation();
+		Out.PatternOrigins[Index] = FVector4f(
+			float(FMath::Fmod(Origin.X, Period)),
+			float(FMath::Fmod(Origin.Y, Period)),
+			float(FMath::Fmod(Origin.Z, Period)),
+			0.f);
+		Out.PatternShapes[Index] = FVector4f(Slot.Shape == EDeusGoLookPattern::Hexagons ? 1.f : 0.f, float(Size), Slot.FacetVariation, Slot.GrooveWidth);
+		Out.PatternGrooves[Index] = FVector4f(Slot.GrooveDarkness, Slot.BevelStrength, 0.f, 0.f);
+		Out.PatternTints[Index] = FVector4f(Slot.Tint);
+		Out.PatternBevels[Index] = FVector4f(Slot.BevelColor);
+	}
 
 	Out.PosterizeLevels = float(FMath::Max(Sty.PosterizeLevels, 2));
 	Out.PosterizeStrength = Sty.bPosterize ? Sty.PosterizeStrength : 0.f;

@@ -16,6 +16,11 @@ float4 OutlineColor;
 float4 CreaseColor;
 float4 NeonColors[4]; // rgb, a zone brightness
 float4 NeonZones[4]; // pulse amount, pulse speed, line style, unused
+float4 PatternOrigins[4]; // xyz folded camera offset
+float4 PatternShapes[4]; // shape, size, facet variation, groove width
+float4 PatternGrooves[4]; // groove darkness, bevel strength, unused, unused
+float4 PatternTints[4];
+float4 PatternBevels[4];
 float3 FogNoiseOrigin;
 float3 NeonHexOrigin;
 float FogStart;
@@ -59,6 +64,7 @@ float AccentStrength;
 float NeonHexSize;
 float NeonHexStrength;
 float NeonHexLine;
+float PatternsEnabled;
 float NeonOccludedOpacity;
 float NeonIgnoreFog;
 float NeonSaturationBoost;
@@ -174,14 +180,18 @@ float HexDistance(float2 P)
 
 // 0 at the cell center, 0.5 on its border
 // rows every 1.75 not 1.732, invisible, but lets 7 cells tile on every axis for the origin fold
-float HexCellEdge(float2 UV)
+float2 HexLocal(float2 UV)
 {
 	const float2 R = float2(1.0f, 1.75f);
 	const float2 H = R * 0.5f;
 	float2 A = UV - R * floor(UV / R) - H;
 	float2 B = (UV - H) - R * floor((UV - H) / R) - H;
-	float2 G = dot(A, A) < dot(B, B) ? A : B;
-	return HexDistance(G);
+	return dot(A, A) < dot(B, B) ? A : B;
+}
+
+float HexCellEdge(float2 UV)
+{
+	return HexDistance(HexLocal(UV));
 }
 
 // world anchored, projected on the surface's dominant axis so floors and walls both get it
@@ -199,9 +209,16 @@ float NeonHexPattern(float2 UV, float2 TexelSize)
 	return smoothstep(0.5f - NeonHexLine - 0.02f, 0.5f - NeonHexLine, Dist);
 }
 
-uint NeonStencilAt(float2 UV)
+uint StencilAt(float2 UV)
 {
 	return CalcSceneCustomStencil(uint2(UV * View.BufferSizeAndInvSize.xy));
+}
+
+// 1..4 are neon zones, 5..8 belong to surface patterns and must not draw neon edges
+uint NeonStencilAt(float2 UV)
+{
+	uint S = StencilAt(UV);
+	return S <= 4 ? S : 0;
 }
 
 struct FNeon
@@ -255,7 +272,7 @@ FNeon DetectNeon(float2 UV, float2 TexelSize, float2 PixelPos, float SceneDepth)
 	// custom depth ignores scene depth, so hidden zones are still in the stencil
 	bool bVisible = NearestZone <= SceneDepth * 1.002f + 2.0f;
 	float Visibility = bVisible ? 1.0f : NeonOccludedOpacity;
-	uint Zone = (Id - 1) % 4;
+	uint Zone = Id - 1;
 	float4 ZoneColor = NeonColors[Zone];
 	float4 ZoneParams = NeonZones[Zone];
 
@@ -294,6 +311,90 @@ FNeon DetectNeon(float2 UV, float2 TexelSize, float2 PixelPos, float SceneDepth)
 	Out.Emissive = C * ZoneColor.a * NeonGlow * Pulse * Weight * Visibility;
 	Out.Mask = Visibility;
 	return Out;
+}
+
+struct FPatternCell
+{
+	float EdgeDistance; // 0 on the border, 1 at the center
+	float2 Outward; // in the pattern plane, for the bevel side
+	float2 Id;
+};
+
+// wraps every 64 cells, the 448 cell origin fold is a multiple so facets never pop
+float PatternHash(float2 Id)
+{
+	Id -= 64.0f * floor(Id / 64.0f);
+	return frac(sin(dot(Id, float2(12.9898f, 78.233f))) * 43758.5453f);
+}
+
+// rows 0.875 high not 0.866, invisible, keeps 7 cells tiling on every axis
+FPatternCell TriangleCell(float2 P)
+{
+	const float H = 0.875f;
+	float B = P.y / H;
+	float A = P.x - 0.5f * B;
+	float2 Cell = floor(float2(A, B));
+	float2 F = float2(A, B) - Cell;
+	bool bUpper = F.x + F.y > 1.0f;
+	float2 Q = bUpper ? 1.0f - F : F;
+
+	// distance to the bottom, left and diagonal edge
+	float3 D = float3(Q.y, Q.x, 1.0f - Q.x - Q.y) * H;
+	float Nearest = min(D.x, min(D.y, D.z));
+	float2 N = D.x <= Nearest ? float2(0.0f, -1.0f) : (D.y <= Nearest ? float2(-0.866f, 0.5f) : float2(0.866f, 0.5f));
+
+	FPatternCell Out;
+	Out.EdgeDistance = Nearest / (H / 3.0f);
+	Out.Outward = bUpper ? -N : N;
+	Out.Id = Cell * float2(2.0f, 1.0f) + float2(bUpper ? 1.0f : 0.0f, 0.0f);
+	return Out;
+}
+
+FPatternCell HexCell(float2 P)
+{
+	float2 G = HexLocal(P);
+
+	FPatternCell Out;
+	Out.EdgeDistance = (0.5f - HexDistance(G)) / 0.5f;
+	Out.Outward = normalize(G + 1e-5f);
+	Out.Id = P - G;
+	return Out;
+}
+
+// facets, grooves and a bevel, multiplied into the lit surface so lighting and fog still apply
+float3 ApplyPattern(float3 Color, float2 UV, float2 TexelSize, uint Slot)
+{
+	float4 Shape = PatternShapes[Slot];
+	float4 Groove = PatternGrooves[Slot];
+
+	float3 P = TranslatedWorldFromUV(UV);
+	float3 PR = TranslatedWorldFromUV(UV + float2(TexelSize.x, 0.0f));
+	float3 PD = TranslatedWorldFromUV(UV + float2(0.0f, TexelSize.y));
+	float3 N = abs(cross(PR - P, PD - P));
+
+	float3 W = (P + PatternOrigins[Slot].xyz) / Shape.y;
+	float2 Plane = (N.z >= N.x && N.z >= N.y) ? W.xy : (N.x >= N.y ? W.yz : W.xz);
+
+	// ternary cannot return a struct in HLSL
+	FPatternCell Cell;
+	if (Shape.x > 0.5f)
+	{
+		Cell = HexCell(Plane);
+	}
+	else
+	{
+		Cell = TriangleCell(Plane);
+	}
+
+	float Facet = 1.0f + (PatternHash(Cell.Id) - 0.5f) * 2.0f * Shape.z;
+	float NotGroove = smoothstep(Shape.w * 0.5f, Shape.w, Cell.EdgeDistance);
+	Color *= PatternTints[Slot].rgb * Facet * lerp(1.0f - Groove.x, 1.0f, NotGroove);
+
+	// thin band just inside the groove, lit on the side facing a fixed light
+	float Band = NotGroove * (1.0f - smoothstep(Shape.w * 2.5f, Shape.w * 3.5f, Cell.EdgeDistance));
+	float Facing = saturate(dot(Cell.Outward, float2(0.6f, 0.8f)));
+	Color += Color * PatternBevels[Slot].rgb * Groove.y * Band * Facing;
+	return Color;
 }
 
 // hash wraps every 64 cells, matches the period FogNoiseOrigin is folded into
@@ -347,6 +448,17 @@ void DepthPS(
 
 	float3 Color = Scene.rgb;
 	float Depth = CalcSceneDepth(UV);
+
+	// stencil marks hidden parts too, so check the pattern mesh is what is actually on screen here
+	BRANCH
+	if (PatternsEnabled > 0.0f)
+	{
+		uint S = StencilAt(UV);
+		if (S >= 5 && S <= 8 && CalcSceneCustomDepth(UV) <= Depth * 1.002f + 2.0f)
+		{
+			Color = ApplyPattern(Color, UV, TexelSize, S - 5);
+		}
+	}
 
 	// edges first so fog fades them like any other surface
 	BRANCH

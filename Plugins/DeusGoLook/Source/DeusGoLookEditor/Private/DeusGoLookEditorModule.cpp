@@ -46,7 +46,7 @@ namespace DeusGoLookEditor
 	static void WarnIfStencilOff()
 	{
 		static bool bWarned = false;
-		if (bWarned || !Settings().Style.Neon.bNeon)
+		if (bWarned || (!Settings().Style.Neon.bNeon && !Settings().Style.Patterns.bPatterns))
 		{
 			return;
 		}
@@ -58,7 +58,7 @@ namespace DeusGoLookEditor
 		}
 
 		bWarned = true;
-		FNotificationInfo Info(LOCTEXT("StencilOff", "Neon Zones need Custom Depth-Stencil Pass set to Enabled with Stencil"));
+		FNotificationInfo Info(LOCTEXT("StencilOff", "Neon Zones and Surface Patterns need Custom Depth-Stencil Pass set to Enabled with Stencil"));
 		Info.SubText = LOCTEXT("StencilOffSub", "Project Settings > Rendering > Postprocessing");
 		Info.Hyperlink = FSimpleDelegate::CreateStatic(&OpenRenderingSettings);
 		Info.HyperlinkText = LOCTEXT("StencilOffLink", "Open Rendering Settings");
@@ -217,6 +217,7 @@ namespace DeusGoLookEditor
 		AddToggle(Toggles, "Creases", LOCTEXT("Creases", "Creases"), [](UDeusGoLookSettings& S) -> bool& { return S.Style.Edges.bCreases; });
 		AddToggle(Toggles, "Mist", LOCTEXT("Mist", "Ground Mist"), [](UDeusGoLookSettings& S) -> bool& { return S.Style.Mist.bMist; });
 		AddToggle(Toggles, "Neon", LOCTEXT("Neon", "Neon Zones"), [](UDeusGoLookSettings& S) -> bool& { return S.Style.Neon.bNeon; });
+		AddToggle(Toggles, "Patterns", LOCTEXT("Patterns", "Surface Patterns"), [](UDeusGoLookSettings& S) -> bool& { return S.Style.Patterns.bPatterns; });
 		AddToggle(Toggles, "Posterize", LOCTEXT("Posterize", "Posterize"), [](UDeusGoLookSettings& S) -> bool& { return S.Style.Stylize.bPosterize; });
 		AddToggle(Toggles, "TiltShift", LOCTEXT("TiltShift", "Tilt Shift"), [](UDeusGoLookSettings& S) -> bool& { return S.Style.Stylize.bTiltShift; });
 
@@ -301,7 +302,7 @@ private:
 		return
 		{
 			FDeusGoLookFog::StaticStruct(), FDeusGoLookBackground::StaticStruct(), FDeusGoLookMist::StaticStruct(), FDeusGoLookGrade::StaticStruct(),
-			FDeusGoLookEdges::StaticStruct(), FDeusGoLookNeon::StaticStruct(), FDeusGoLookStylize::StaticStruct()
+			FDeusGoLookEdges::StaticStruct(), FDeusGoLookNeon::StaticStruct(), FDeusGoLookPatterns::StaticStruct(), FDeusGoLookStylize::StaticStruct()
 		};
 	}
 
