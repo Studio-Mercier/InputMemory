@@ -1,0 +1,534 @@
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/SceneTexturesCommon.ush"
+#include "/Engine/Private/ScreenPass.ush"
+
+Texture2D InputTexture;
+SamplerState InputSampler;
+
+float2 InputTexelSize;
+float4 FogColor;
+float4 BackgroundColor;
+float4 SkyTopColor;
+float4 MistColor;
+float4 ShadowTint;
+float4 HighlightTint;
+float4 OutlineColor;
+float4 CreaseColor;
+float4 NeonColors[4]; // rgb, a zone brightness
+float4 NeonZones[4]; // pulse amount, pulse speed, line style, unused
+float3 FogNoiseOrigin;
+float3 NeonHexOrigin;
+float FogStart;
+float FogRange;
+float FogMaxOpacity;
+float FogCurve;
+float BackgroundDistance;
+float BackgroundOpacity;
+float SkyGradient;
+float SkyGradientCurve;
+float MistOpacity;
+float MistTop;
+float MistFalloff;
+float Desaturation;
+float DistanceDesaturation;
+float Contrast;
+float Vignette;
+float OutlineStrength;
+float CreaseStrength;
+float OutlineThickness;
+float OutlineDepthThreshold;
+float CreaseNormalThreshold;
+float EdgeSoftness;
+float EdgeFadeDistance;
+float NeonEnabled;
+float NeonGlow;
+float NeonWidth;
+float NeonFill;
+float NeonDashLength;
+float NeonDashSpeed;
+float OutlineFarWidth;
+float OutlineFromSurface;
+float OutlineSurfaceDarkness;
+float FogNoiseAmount;
+float FogNoiseScale;
+float FogNoiseSpeed;
+float CompareSplit;
+float AccentHue;
+float AccentRange;
+float AccentStrength;
+float NeonHexSize;
+float NeonHexStrength;
+float NeonHexLine;
+float NeonOccludedOpacity;
+float NeonIgnoreFog;
+float NeonSaturationBoost;
+float PosterizeLevels;
+float PosterizeStrength;
+float TiltShiftFocus;
+float TiltShiftWidth;
+float TiltShiftBlur;
+float Grain;
+
+float Luma(float3 C)
+{
+	return dot(C, float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+// 0 top of the viewport, 1 bottom, zw is viewport NDC from the screen pass VS
+float ViewportY(float4 UVAndScreenPos)
+{
+	return 0.5f - 0.5f * UVAndScreenPos.w;
+}
+
+float ViewportX(float4 UVAndScreenPos)
+{
+	return 0.5f + 0.5f * UVAndScreenPos.z;
+}
+
+// before/after preview, left of the split is left alone
+bool IsBeforeSide(float4 UVAndScreenPos)
+{
+	return CompareSplit > 0.0f && ViewportX(UVAndScreenPos) < CompareSplit;
+}
+
+float3 TranslatedWorldFromUV(float2 UV)
+{
+	float DeviceZ = LookupDeviceZ(UV);
+	float2 SvPos = UV * View.BufferSizeAndInvSize.xy;
+	return SvPositionToTranslatedWorld(float4(SvPos, DeviceZ, 1.0f));
+}
+
+struct FEdges
+{
+	float Silhouette;
+	float Crease;
+};
+
+// depth curvature for silhouettes, reconstructed normals for creases
+FEdges DetectEdges(float2 UV, float2 TexelSize, float CenterDepth)
+{
+	FEdges Out;
+	Out.Silhouette = 0.0f;
+	Out.Crease = 0.0f;
+
+	// thins toward Fade Distance, under half a pixel the taps land on the same texel
+	float WidthScale = EdgeFadeDistance > 0.0f ? lerp(1.0f, OutlineFarWidth, saturate(CenterDepth / EdgeFadeDistance)) : 1.0f;
+	float2 O = TexelSize * max(OutlineThickness * WidthScale, 0.5f);
+
+	float2 UVL = UV - float2(O.x, 0.0f);
+	float2 UVR = UV + float2(O.x, 0.0f);
+	float2 UVU = UV - float2(0.0f, O.y);
+	float2 UVD = UV + float2(0.0f, O.y);
+
+	float DL = CalcSceneDepth(UVL);
+	float DR = CalcSceneDepth(UVR);
+	float DU = CalcSceneDepth(UVU);
+	float DD = CalcSceneDepth(UVD);
+
+	float InvDepth = 1.0f / max(CenterDepth, 1.0f);
+
+	// second derivative, flat on any slope and only spikes at a real break
+	float Curvature = (abs(DL + DR - 2.0f * CenterDepth) + abs(DU + DD - 2.0f * CenterDepth)) * InvDepth;
+
+	float T = OutlineDepthThreshold;
+	float Ramp = T * EdgeSoftness;
+
+	// signed laplacian, positive when center is in front of its neighbours
+	float Bulge = (DL + DR + DU + DD - 4.0f * CenterDepth) * 0.25f * InvDepth;
+	// soft split, a hard step flips per jitter offset and TSR sees it as noise
+	float SideRamp = max(T * 0.25f * EdgeSoftness, 1e-5f);
+	float NearSide = smoothstep(-SideRamp, SideRamp, Bulge);
+
+	Out.Silhouette = smoothstep(T - Ramp, T + Ramp, Curvature) * NearSide;
+
+	// reconstructed normals, four quadrants around the pixel
+	float3 P = TranslatedWorldFromUV(UV);
+	float3 PL = TranslatedWorldFromUV(UVL);
+	float3 PR = TranslatedWorldFromUV(UVR);
+	float3 PU = TranslatedWorldFromUV(UVU);
+	float3 PD = TranslatedWorldFromUV(UVD);
+
+	float3 N1 = normalize(cross(PU - P, PL - P));
+	float3 N2 = normalize(cross(PL - P, PD - P));
+	float3 N3 = normalize(cross(PD - P, PR - P));
+	float3 N4 = normalize(cross(PR - P, PU - P));
+
+	float MinDot = min(min(dot(N1, N2), dot(N2, N3)), min(dot(N3, N4), dot(N4, N1)));
+	float NormalBreak = 1.0f - MinDot;
+
+	float NT = CreaseNormalThreshold;
+	float NRamp = NT * EdgeSoftness;
+	float Concave = 1.0f - NearSide;
+
+	Out.Crease = smoothstep(NT - NRamp, NT + NRamp, NormalBreak) * Concave;
+	Out.Crease *= 1.0f - Out.Silhouette;
+
+	return Out;
+}
+
+float HexDistance(float2 P)
+{
+	P = abs(P);
+	return max(dot(P, float2(0.5f, 0.866f)), P.x);
+}
+
+// 0 at the cell center, 0.5 on its border
+// rows every 1.75 not 1.732, invisible, but lets 7 cells tile on every axis for the origin fold
+float HexCellEdge(float2 UV)
+{
+	const float2 R = float2(1.0f, 1.75f);
+	const float2 H = R * 0.5f;
+	float2 A = UV - R * floor(UV / R) - H;
+	float2 B = (UV - H) - R * floor((UV - H) / R) - H;
+	float2 G = dot(A, A) < dot(B, B) ? A : B;
+	return HexDistance(G);
+}
+
+// world anchored, projected on the surface's dominant axis so floors and walls both get it
+float NeonHexPattern(float2 UV, float2 TexelSize)
+{
+	float3 P = TranslatedWorldFromUV(UV);
+	float3 PR = TranslatedWorldFromUV(UV + float2(TexelSize.x, 0.0f));
+	float3 PD = TranslatedWorldFromUV(UV + float2(0.0f, TexelSize.y));
+	float3 N = abs(cross(PR - P, PD - P));
+
+	float3 W = (P + NeonHexOrigin) / NeonHexSize;
+	float2 Plane = (N.z >= N.x && N.z >= N.y) ? W.xy : (N.x >= N.y ? W.yz : W.xz);
+
+	float Dist = HexCellEdge(Plane);
+	return smoothstep(0.5f - NeonHexLine - 0.02f, 0.5f - NeonHexLine, Dist);
+}
+
+uint NeonStencilAt(float2 UV)
+{
+	return CalcSceneCustomStencil(uint2(UV * View.BufferSizeAndInvSize.xy));
+}
+
+struct FNeon
+{
+	float3 Emissive;
+	float Mask;
+};
+
+// line where the stencil changes, custom depth against scene depth for occlusion
+FNeon DetectNeon(float2 UV, float2 TexelSize, float2 PixelPos, float SceneDepth)
+{
+	FNeon Out;
+	Out.Emissive = 0.0f;
+	Out.Mask = 0.0f;
+
+	const float2 Offsets[8] =
+	{
+		float2(-1.0f, 0.0f), float2(1.0f, 0.0f), float2(0.0f, -1.0f), float2(0.0f, 1.0f),
+		float2(-0.707f, -0.707f), float2(0.707f, -0.707f), float2(-0.707f, 0.707f), float2(0.707f, 0.707f)
+	};
+
+	uint Center = NeonStencilAt(UV);
+	float2 O = TexelSize * NeonWidth;
+
+	uint Id = Center;
+	bool bEdge = false;
+	float NearestZone = Center != 0 ? CalcSceneCustomDepth(UV) : 1e30f;
+
+	UNROLL
+	for (int i = 0; i < 8; i++)
+	{
+		float2 SampleUV = UV + Offsets[i] * O;
+		uint S = NeonStencilAt(SampleUV);
+		if (S != Center)
+		{
+			bEdge = true;
+			// boundary between two zones takes the higher id, stable per pixel
+			Id = max(Id, S);
+			if (S != 0)
+			{
+				NearestZone = min(NearestZone, CalcSceneCustomDepth(SampleUV));
+			}
+		}
+	}
+
+	if (Id == 0)
+	{
+		return Out;
+	}
+
+	// custom depth ignores scene depth, so hidden zones are still in the stencil
+	bool bVisible = NearestZone <= SceneDepth * 1.002f + 2.0f;
+	float Visibility = bVisible ? 1.0f : NeonOccludedOpacity;
+	uint Zone = (Id - 1) % 4;
+	float4 ZoneColor = NeonColors[Zone];
+	float4 ZoneParams = NeonZones[Zone];
+
+	// screen space diagonal stripes, cut into dashes wherever an outline crosses them
+	float Line = 1.0f;
+	if (bEdge && ZoneParams.z > 0.5f)
+	{
+		float Along = (PixelPos.x + PixelPos.y) / (2.0f * NeonDashLength);
+		if (ZoneParams.z > 1.5f)
+		{
+			Along -= View.RealTime * NeonDashSpeed / (2.0f * NeonDashLength);
+		}
+		float F = frac(Along);
+		Line = smoothstep(0.0f, 0.08f, F) * (1.0f - smoothstep(0.5f, 0.58f, F));
+	}
+
+	// ghost is outline only, a filled ghost reads as a bug
+	float Fill = 0.0f;
+	if (bVisible && Center != 0)
+	{
+		Fill = NeonFill;
+		BRANCH
+		if (NeonHexStrength > 0.0f)
+		{
+			Fill += NeonHexPattern(UV, TexelSize) * NeonHexStrength;
+		}
+	}
+	float Weight = bEdge ? max(Line, Fill) : Fill;
+
+	float3 C = ZoneColor.rgb;
+	float L = Luma(C);
+	C = max(L + (C - L) * NeonSaturationBoost, 0.0f);
+
+	float Pulse = 1.0f + ZoneParams.x * sin(View.RealTime * ZoneParams.y * 2.0f * PI);
+
+	Out.Emissive = C * ZoneColor.a * NeonGlow * Pulse * Weight * Visibility;
+	Out.Mask = Visibility;
+	return Out;
+}
+
+// hash wraps every 64 cells, matches the period FogNoiseOrigin is folded into
+float NoiseHash(float3 Cell)
+{
+	Cell -= 64.0f * floor(Cell / 64.0f);
+	return frac(sin(dot(Cell, float3(12.9898f, 78.233f, 37.719f))) * 43758.5453f);
+}
+
+float ValueNoise(float3 X)
+{
+	float3 I = floor(X);
+	float3 F = frac(X);
+	F = F * F * (3.0f - 2.0f * F);
+
+	float A = lerp(NoiseHash(I), NoiseHash(I + float3(1, 0, 0)), F.x);
+	float B = lerp(NoiseHash(I + float3(0, 1, 0)), NoiseHash(I + float3(1, 1, 0)), F.x);
+	float C = lerp(NoiseHash(I + float3(0, 0, 1)), NoiseHash(I + float3(1, 0, 1)), F.x);
+	float D = lerp(NoiseHash(I + float3(0, 1, 1)), NoiseHash(I + float3(1, 1, 1)), F.x);
+	return lerp(lerp(A, B, F.y), lerp(C, D, F.y), F.z);
+}
+
+// world anchored, 1 on average, drifts along x
+float FogNoiseFactor(float3 TranslatedPos)
+{
+	float3 W = (TranslatedPos + FogNoiseOrigin) / FogNoiseScale;
+	W.x += View.RealTime * FogNoiseSpeed / FogNoiseScale;
+	// second octave stays on whole multiples so the 64 cell wrap still holds
+	float N = ValueNoise(W) * 0.65f + ValueNoise(W * 2.0f + 17.0f) * 0.35f;
+	return 1.0f + (N - 0.5f) * 2.0f * FogNoiseAmount;
+}
+
+// ---- depth pass, before DOF at render res ----
+// everything that reads depth or stencil lives here, TSR resolves it like geometry
+// runs before bloom, so neon above 1 blooms for free
+// scene color is pre-exposed linear, fog, mist, sky and neon colors are written as already exposed
+void DepthPS(
+	noperspective float4 UVAndScreenPos : TEXCOORD0,
+	float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0)
+{
+	float2 UV = UVAndScreenPos.xy;
+	float2 TexelSize = View.BufferSizeAndInvSize.zw;
+
+	float4 Scene = InputTexture.SampleLevel(InputSampler, UV, 0);
+	if (IsBeforeSide(UVAndScreenPos))
+	{
+		OutColor = Scene;
+		return;
+	}
+
+	float3 Color = Scene.rgb;
+	float Depth = CalcSceneDepth(UV);
+
+	// edges first so fog fades them like any other surface
+	BRANCH
+	if (Depth < BackgroundDistance && (OutlineStrength > 0.0f || CreaseStrength > 0.0f))
+	{
+		FEdges Edges = DetectEdges(UV, TexelSize, Depth);
+
+		float DistanceFade = EdgeFadeDistance > 0.0f ? saturate(1.0f - Depth / EdgeFadeDistance) : 1.0f;
+
+		// multiplicative, linear values here are unbounded
+		Color *= lerp(1.0f.xxx, CreaseColor.rgb, Edges.Crease * CreaseStrength * DistanceFade);
+
+		float OutlineWeight = Edges.Silhouette * OutlineStrength * DistanceFade;
+		if (OutlineFromSurface > 0.0f)
+		{
+			// silhouettes sit on the near object, so this is that object's own color, richer and darker
+			float L = Luma(Color);
+			float3 Ink = max(L + (Color - L) * 1.4f, 0.0f) * (1.0f - OutlineSurfaceDarkness);
+			Color = lerp(Color, Ink, OutlineWeight);
+		}
+		else
+		{
+			Color *= lerp(1.0f.xxx, OutlineColor.rgb, OutlineWeight);
+		}
+	}
+
+	FNeon Neon;
+	Neon.Emissive = 0.0f;
+	Neon.Mask = 0.0f;
+	BRANCH
+	if (NeonEnabled > 0.0f)
+	{
+		Neon = DetectNeon(UV, TexelSize, SvPosition.xy, Depth);
+	}
+
+	float SkyMask = saturate((Depth - BackgroundDistance) / max(BackgroundDistance * 0.25f, 1.0f));
+	float FogAmount = pow(saturate((Depth - FogStart) / FogRange), FogCurve) * FogMaxOpacity;
+
+	float MistAmount = 0.0f;
+	BRANCH
+	if ((MistOpacity > 0.0f || FogNoiseAmount > 0.0f) && SkyMask < 1.0f)
+	{
+		float3 P = TranslatedWorldFromUV(UV);
+		MistAmount = saturate((MistTop - P.z) / MistFalloff) * MistOpacity * (1.0f - SkyMask);
+
+		if (FogNoiseAmount > 0.0f)
+		{
+			float Noise = FogNoiseFactor(P);
+			FogAmount = saturate(FogAmount * Noise);
+			MistAmount = saturate(MistAmount * Noise);
+		}
+	}
+
+	float Protect = Neon.Mask * NeonIgnoreFog;
+	FogAmount *= 1.0f - Protect;
+	MistAmount *= 1.0f - Protect;
+
+	Color = lerp(Color, Luma(Color).xxx, saturate(DistanceDesaturation * FogAmount));
+	Color = lerp(Color, MistColor.rgb, MistAmount);
+	Color = lerp(Color, FogColor.rgb, FogAmount);
+
+	float3 Sky = BackgroundColor.rgb;
+	if (SkyGradient > 0.0f)
+	{
+		float Up = 1.0f - ViewportY(UVAndScreenPos);
+		Sky = lerp(BackgroundColor.rgb, SkyTopColor.rgb, pow(saturate(Up), SkyGradientCurve));
+	}
+	Color = lerp(Color, Sky, SkyMask * BackgroundOpacity);
+
+	// after the sky so lines over empty space survive, dimmed by whatever fog is still on them
+	Color += Neon.Emissive * (1.0f - FogAmount) * (1.0f - MistAmount);
+
+	OutColor = float4(Color, Scene.a);
+}
+
+// hue 0..1 and saturation, branchless rgb to hsv
+float2 HueSaturation(float3 C)
+{
+	float4 K = float4(0.0f, -1.0f / 3.0f, 2.0f / 3.0f, -1.0f);
+	float4 P = C.g < C.b ? float4(C.bg, K.wz) : float4(C.gb, K.xy);
+	float4 Q = C.r < P.x ? float4(P.xyw, C.r) : float4(C.r, P.yzx);
+	float D = Q.x - min(Q.w, Q.y);
+	return float2(abs(Q.z + (Q.w - Q.y) / (6.0f * D + 1e-5f)), D / (Q.x + 1e-5f));
+}
+
+// greys never count, whatever their tiny hue says
+float AccentMask(float3 C)
+{
+	float2 HS = HueSaturation(C);
+	float Distance = abs(frac(HS.x - AccentHue + 0.5f) - 0.5f);
+	return (1.0f - smoothstep(AccentRange * 0.5f, AccentRange, Distance)) * smoothstep(0.1f, 0.3f, HS.y);
+}
+
+// golden angle spiral, radius grows away from the focus band
+float3 TiltShift(float2 UV, float Y)
+{
+	float3 Center = InputTexture.SampleLevel(InputSampler, UV, 0).rgb;
+
+	float HalfBand = TiltShiftWidth * 0.5f;
+	float Reach = max(max(TiltShiftFocus, 1.0f - TiltShiftFocus) - HalfBand, 0.01f);
+	float Away = saturate((abs(Y - TiltShiftFocus) - HalfBand) / Reach);
+	float Radius = TiltShiftBlur * Away * Away;
+
+	BRANCH
+	if (Radius < 0.5f)
+	{
+		return Center;
+	}
+
+	const int Taps = 16;
+	float3 Sum = 0.0f;
+	UNROLL
+	for (int i = 0; i < Taps; i++)
+	{
+		float R = sqrt((i + 0.5f) / Taps) * Radius;
+		float A = i * 2.39996323f;
+		Sum += InputTexture.SampleLevel(InputSampler, UV + float2(cos(A), sin(A)) * R * InputTexelSize, 0).rgb;
+	}
+	return Sum / Taps;
+}
+
+// ---- grade pass, after tonemap, display referred ----
+// no depth reads here, depth is unresolved after TSR and flickers at every break
+void MainPS(
+	noperspective float4 UVAndScreenPos : TEXCOORD0,
+	float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0)
+{
+	float2 UV = UVAndScreenPos.xy;
+
+	// split divider, one pixel wide at any resolution, derivative taken before any branch
+	float X = ViewportX(UVAndScreenPos);
+	float Divider = CompareSplit > 0.0f ? 1.0f - saturate(abs(X - CompareSplit) / max(fwidth(X), 1e-5f)) : 0.0f;
+
+	if (IsBeforeSide(UVAndScreenPos))
+	{
+		float3 Before = InputTexture.SampleLevel(InputSampler, UV, 0).rgb;
+		OutColor = float4(lerp(Before, 1.0f.xxx, Divider), 1.0f);
+		return;
+	}
+
+	float3 Color;
+	BRANCH
+	if (TiltShiftBlur > 0.0f)
+	{
+		Color = TiltShift(UV, ViewportY(UVAndScreenPos));
+	}
+	else
+	{
+		Color = InputTexture.SampleLevel(InputSampler, UV, 0).rgb;
+	}
+
+	float L = Luma(Color);
+	float Desat = Desaturation;
+	if (AccentStrength > 0.0f)
+	{
+		Desat *= 1.0f - AccentMask(Color) * AccentStrength;
+	}
+	Color = lerp(Color, L.xxx, Desat);
+	Color *= lerp(ShadowTint.rgb, HighlightTint.rgb, saturate(L));
+	Color = saturate((Color - 0.5f) * Contrast + 0.5f);
+
+	if (PosterizeStrength > 0.0f)
+	{
+		float Steps = PosterizeLevels - 1.0f;
+		Color = lerp(Color, round(Color * Steps) / Steps, PosterizeStrength);
+	}
+
+	float Aspect = View.ViewSizeAndInvSize.x * View.ViewSizeAndInvSize.w;
+	float2 Centered = UVAndScreenPos.zw * 0.5f * float2(Aspect, 1.0f);
+	float Vig = 1.0f - saturate(dot(Centered, Centered) * 1.6f) * Vignette;
+	Color *= Vig;
+
+	if (Grain > 0.0f)
+	{
+		// interleaved gradient noise, shifted per frame so it moves
+		float2 P = SvPosition.xy + float(View.StateFrameIndexMod8) * float2(47.0f, 17.0f);
+		float Noise = frac(52.9829189f * frac(dot(P, float2(0.06711056f, 0.00583715f))));
+		Color = saturate(Color + (Noise - 0.5f) * Grain);
+	}
+
+	Color = lerp(Color, 1.0f.xxx, Divider);
+
+	OutColor = float4(Color, 1.0f);
+}
